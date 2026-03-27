@@ -1,6 +1,10 @@
 # Vercel Blob Emulator
 
-> **For local development and testing only. Do not use in production.**
+> [!WARNING]
+> **NOT FOR PRODUCTION USE.**
+> This emulator has no authentication, no access control, and no data encryption.
+> Any request can read, write, or delete any blob without credentials.
+> Use [Vercel Blob](https://vercel.com/docs/vercel-blob) in production.
 
 A local emulator for the [Vercel Blob](https://vercel.com/docs/vercel-blob) API,
 compatible with the `@vercel/blob` SDK.

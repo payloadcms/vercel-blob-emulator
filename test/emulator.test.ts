@@ -276,6 +276,76 @@ describe("serve", () => {
 });
 
 // ---------------------------------------------------------------------------
+// subfolders
+// ---------------------------------------------------------------------------
+
+describe("subfolders", () => {
+  test("put creates intermediate directories (a/b/c/image.png)", async () => {
+    const result = await put("a/b/c/image.png", "nested content", {
+      access: "public",
+      contentType: "image/png",
+    });
+
+    expect(result.pathname).toBe("a/b/c/image.png");
+    expect(result.url).toBe(`${BASE_URL}/a/b/c/image.png`);
+  });
+
+  test("serve retrieves a deeply nested blob", async () => {
+    const content = "deep content";
+    const r = await put("x/y/z/deep.txt", content, {
+      access: "public",
+      contentType: "text/plain",
+    });
+
+    const res = await fetch(r.url);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(content);
+  });
+
+  test("head returns correct metadata for a deeply nested blob", async () => {
+    const content = "meta deep";
+    const r = await put("deep/meta/file.txt", content, {
+      access: "public",
+      contentType: "text/plain",
+    });
+
+    const meta = await head(r.url);
+    expect(meta.pathname).toBe("deep/meta/file.txt");
+    expect(meta.size).toBe(Buffer.byteLength(content));
+  });
+
+  test("list returns deeply nested blobs with prefix filter", async () => {
+    await put("nested/a/b/one.txt", "1", { access: "public" });
+    await put("nested/a/b/two.txt", "2", { access: "public" });
+
+    const result = await list({ prefix: "nested/a/b/" });
+    const pathnames = result.blobs.map((b) => b.pathname);
+    expect(pathnames).toContain("nested/a/b/one.txt");
+    expect(pathnames).toContain("nested/a/b/two.txt");
+  });
+
+  test("folded mode exposes only the immediate virtual folder for deep paths", async () => {
+    await put("folded-deep/a/b/c/file.txt", "x", { access: "public" });
+
+    const result = await list({ prefix: "folded-deep/", mode: "folded" });
+    expect((result as { folders: string[] }).folders).toContain("folded-deep/a/");
+    // The file should not appear as a direct blob (it's inside a subfolder)
+    const directPathnames = result.blobs.map((b) => b.pathname);
+    expect(directPathnames).not.toContain("folded-deep/a/b/c/file.txt");
+  });
+
+  test("del removes a deeply nested blob", async () => {
+    const r = await put("del/deep/nested/file.txt", "bye", {
+      access: "public",
+    });
+
+    await del(r.url);
+
+    await expect(head(r.url)).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // multipart upload  (put with multipart:true drives the /mpu endpoints)
 // ---------------------------------------------------------------------------
 

@@ -34,8 +34,11 @@ app.route("/api/blob", api);
 // Blob serving
 app.route("/", serve);
 
-console.log(
-  `Vercel Blob Emulator listening on port ${config.port} — base URL: ${config.baseUrl}`,
+console.log(`Vercel Blob Emulator listening on port ${config.port} — base URL: ${config.baseUrl}`);
+console.warn(
+  "WARNING: This emulator is for local development only. " +
+  "It has no authentication, no access control, and no encryption. " +
+  "Use Vercel Blob (https://vercel.com/docs/vercel-blob) in production.",
 );
 
 export default {

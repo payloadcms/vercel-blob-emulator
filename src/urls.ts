@@ -2,7 +2,8 @@ import { config } from "./config.ts";
 import type { BlobMeta, PutBlobResult, HeadBlobResult } from "./types.ts";
 
 export function blobUrl(pathname: string, _access: "public" | "private"): string {
-  return `${config.baseUrl}/${pathname}`;
+  const encodedPathname = pathname.split('/').map(encodeURIComponent).join('/');
+  return `${config.baseUrl}/${encodedPathname}`;
 }
 
 export function downloadUrl(pathname: string, access: "public" | "private"): string {
@@ -18,7 +19,7 @@ export function pathnameFromUrl(url: string): string {
     return url.split("?")[0].replace(/^\//, "");
   }
 
-  return parsed.pathname.replace(/^\//, "");
+  return decodeURIComponent(parsed.pathname.replace(/^\//, ""));
 }
 
 export function contentDisposition(pathname: string, forDownload: boolean): string {
