@@ -20,17 +20,25 @@ compatible with the `@vercel/blob` SDK.
 
 ## Installation
 
+### Docker CLI
+
+```bash
+docker run -p 3100:3000 \
+  -e EMULATOR_BASE_URL=http://localhost:3100 \
+  -v vercel_blob_data:/data \
+  ghcr.io/payloadcms/vercel-blob-emulator:latest
+```
+
+### Docker Compose
+
 ```yaml
 services:
   vercel-blob:
-    profiles: [all, storage]
     image: ghcr.io/payloadcms/vercel-blob-emulator:latest
     container_name: vercel-blob
-    restart: always
     ports:
       - "3100:3000"
     environment:
-      BLOB_STORE_ID: emulator
       EMULATOR_BASE_URL: "http://localhost:3100"
     volumes:
       - vercel_blob_data:/data
