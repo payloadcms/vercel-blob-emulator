@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { del, head, list, put } from "@vercel/blob";
+import { BlobNotFoundError, del, head, list, put } from "@vercel/blob";
 import {
   handleUpload,
   upload,
@@ -125,8 +125,8 @@ describe("head", () => {
     expect(meta.cacheControl).toMatch(/public, max-age=/);
   });
 
-  test("throws for a nonexistent blob", async () => {
-    await expect(head(`${BASE_URL}/does-not-exist.txt`)).rejects.toThrow();
+  test("throws BlobNotFoundError for a nonexistent blob", async () => {
+    await expect(head(`${BASE_URL}/does-not-exist.txt`)).rejects.toThrow(BlobNotFoundError);
   });
 
   test("resolves metadata when given a production-format blob URL", async () => {
@@ -267,9 +267,11 @@ describe("serve", () => {
     expect(res.headers.get("content-disposition")).toContain("attachment");
   });
 
-  test("returns 404 for an unknown blob URL", async () => {
+  test("returns 404 with not_found error body for an unknown blob URL", async () => {
     const res = await fetch(`${BASE_URL}/no-such-file.txt`);
     expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error.code).toBe("not_found");
   });
 });
 

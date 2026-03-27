@@ -138,7 +138,10 @@ api.get("/", async (c) => {
       const meta = await readMeta(pathname);
       return c.json(metaToResult(meta), 200);
     } catch {
-      return c.json({ error: "Not Found" }, 404);
+      return c.json(
+        { error: { code: "not_found", message: "The requested blob does not exist" } },
+        404,
+      );
     }
   }
 

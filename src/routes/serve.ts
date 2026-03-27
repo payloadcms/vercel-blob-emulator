@@ -9,13 +9,13 @@ const serve = new Hono();
 serve.get("/:pathname{.+}", async (c) => {
   const pathname = c.req.param("pathname");
 
-  if (!pathname) return c.json({ error: "Not Found" }, 404);
+  if (!pathname) return c.json({ error: { code: "not_found", message: "The requested blob does not exist" } }, 404);
 
   let meta;
   try {
     meta = await readMeta(pathname);
   } catch {
-    return c.json({ error: "Not Found" }, 404);
+    return c.json({ error: { code: "not_found", message: "The requested blob does not exist" } }, 404);
   }
 
   const etag = meta.etag;
