@@ -1,6 +1,3 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
-import { config } from "./config.ts";
-
 const CLIENT_TOKEN_PREFIX = "vercel_blob_client_";
 
 /** The options `generateClientTokenFromReadWriteToken` signs into a client token. */
@@ -41,9 +38,7 @@ export function isClientToken(authorization: string | undefined): boolean {
  * `getPayloadFromClientToken` in `@vercel/blob`.
  */
 export function parseClientToken(authorization: string | undefined): {
-  encodedPayload: string;
   payload: ClientTokenPayload;
-  signature: string;
 } | null {
   const token = getBearerToken(authorization);
   if (!token?.startsWith(CLIENT_TOKEN_PREFIX)) return null;
@@ -51,16 +46,14 @@ export function parseClientToken(authorization: string | undefined): {
   const encodedToken = token.split("_")[4];
   if (!encodedToken) return null;
 
-  const [signature, encodedPayload] = Buffer.from(encodedToken, "base64")
-    .toString()
-    .split(".");
-  if (!signature || !encodedPayload) return null;
+  const encodedPayload = Buffer.from(encodedToken, "base64").toString().split(".")[1];
+  if (!encodedPayload) return null;
 
   try {
     const payload = JSON.parse(
       Buffer.from(encodedPayload, "base64").toString(),
     ) as ClientTokenPayload;
-    return { encodedPayload, payload, signature };
+    return { payload };
   } catch {
     return null;
   }
@@ -69,10 +62,8 @@ export function parseClientToken(authorization: string | undefined): {
 /**
  * Checks a request against the restrictions signed into its client token. Returns the error to
  * send, or `null` when the request is allowed. Requests with a read-write token are always
- * allowed, as before.
- *
- * The signature is only checked when `BLOB_READ_WRITE_TOKEN` is configured, since a client token
- * is signed with the app's read-write token.
+ * allowed, as before. The signature is not verified: like the rest of the emulator, this is not
+ * access control, only the same upload rules Vercel Blob applies.
  */
 export function checkClientToken({
   authorization,
@@ -91,11 +82,7 @@ export function checkClientToken({
   const token = parseClientToken(authorization);
   if (!token) return forbidden();
 
-  const { encodedPayload, payload, signature } = token;
-
-  if (config.readWriteToken && !isSignatureValid({ encodedPayload, signature })) {
-    return forbidden();
-  }
+  const { payload } = token;
 
   if (payload.validUntil !== undefined && Date.now() > payload.validUntil) {
     return { code: "client_token_expired", message: "Token expired", status: 403 };
@@ -156,21 +143,6 @@ function forbidden(): ClientTokenError {
     message: "Access denied, please provide a valid token for this resource.",
     status: 403,
   };
-}
-
-function isSignatureValid({
-  encodedPayload,
-  signature,
-}: {
-  encodedPayload: string;
-  signature: string;
-}): boolean {
-  const expected = Buffer.from(
-    createHmac("sha256", config.readWriteToken).update(encodedPayload).digest("hex"),
-  );
-  const actual = Buffer.from(signature);
-
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 /** Supports exact types and `type/*` wildcards, as `allowedContentTypes` does. */
