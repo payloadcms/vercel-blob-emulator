@@ -19,6 +19,13 @@ import {
   blobUrl,
 } from "../urls.ts";
 import type { BlobMeta } from "../types.ts";
+import {
+  checkClientToken,
+  checkSize,
+  parseClientToken,
+  toErrorBody,
+  type ClientTokenError,
+} from "../clientToken.ts";
 
 const api = new Hono();
 
@@ -35,6 +42,47 @@ function addSuffix(pathname: string): string {
     return pathname.slice(0, dot) + "-" + randomSuffix() + pathname.slice(dot);
   }
   return pathname + "-" + randomSuffix();
+}
+
+function getContentLength(value: string | undefined): number | undefined {
+  const length = value === undefined ? NaN : parseInt(value, 10);
+  return Number.isNaN(length) ? undefined : length;
+}
+
+function getContentType(header: (name: string) => string | undefined): string {
+  return header("x-content-type") ?? header("content-type") ?? "application/octet-stream";
+}
+
+/**
+ * Upload options a client token signs. Vercel Blob takes them from the token, and the SDK refuses
+ * to send them from the browser, so they replace the request headers for client-token requests.
+ */
+function getUploadOptions(
+  authorization: string | undefined,
+  header: (name: string) => string | undefined,
+): { addRandomSuffix: boolean; allowOverwrite: boolean; cacheControlMaxAge?: string } {
+  const token = parseClientToken(authorization)?.payload;
+
+  if (token) {
+    return {
+      addRandomSuffix: token.addRandomSuffix === true,
+      allowOverwrite: token.allowOverwrite === true,
+      cacheControlMaxAge: token.cacheControlMaxAge?.toString(),
+    };
+  }
+
+  return {
+    addRandomSuffix: header("x-add-random-suffix") === "1",
+    allowOverwrite: header("x-allow-overwrite") === "1",
+    cacheControlMaxAge: header("x-cache-control-max-age"),
+  };
+}
+
+function rejectClientToken(
+  c: { json: (body: object, status: 400 | 403) => Response },
+  error: ClientTokenError,
+): Response {
+  return c.json(toErrorBody(error), error.status);
 }
 
 function defaultCacheControl(maxAge?: string): string {
@@ -91,27 +139,33 @@ async function fireCallback(
 
 // ---- PUT /?pathname= ----
 api.put("/", async (c) => {
-  let pathname = c.req.query("pathname");
-  if (!pathname) return c.json({ error: "pathname is required" }, 400);
+  const requestedPathname = c.req.query("pathname");
+  if (!requestedPathname) return c.json({ error: "pathname is required" }, 400);
 
-  if (c.req.header("x-add-random-suffix") === "1") {
-    pathname = addSuffix(pathname);
-  }
+  const header = (name: string) => c.req.header(name);
+  const authorization = c.req.header("authorization");
+  const contentType = getContentType(header);
 
-  const allowOverwrite = c.req.header("x-allow-overwrite") === "1";
-  if (!allowOverwrite && (await blobExists(pathname))) {
+  const tokenError = checkClientToken({
+    authorization,
+    contentType,
+    pathname: requestedPathname,
+    size: getContentLength(c.req.header("content-length")),
+  });
+  if (tokenError) return rejectClientToken(c, tokenError);
+
+  const options = getUploadOptions(authorization, header);
+  const pathname = options.addRandomSuffix
+    ? addSuffix(requestedPathname)
+    : requestedPathname;
+
+  if (!options.allowOverwrite && (await blobExists(pathname))) {
     return c.json({ error: "Blob already exists" }, 400);
   }
 
   const access =
     c.req.header("x-vercel-blob-access") === "private" ? "private" : "public";
-  const contentType =
-    c.req.header("x-content-type") ??
-    c.req.header("content-type") ??
-    "application/octet-stream";
-  const cacheControl = defaultCacheControl(
-    c.req.header("x-cache-control-max-age"),
-  );
+  const cacheControl = defaultCacheControl(options.cacheControlMaxAge);
 
   const meta = await writeBlob(pathname, c.req.raw.body, {
     contentType,
@@ -120,9 +174,17 @@ api.put("/", async (c) => {
     pathname,
   });
 
+  // A streamed body has no declared length, so its size is only known once it is written.
+  const token = parseClientToken(authorization);
+  const sizeError = token && checkSize({ payload: token.payload, size: meta.size });
+  if (sizeError) {
+    await deleteBlob(pathname);
+    return rejectClientToken(c, sizeError);
+  }
+
   console.log(`blob created: ${pathname} (${meta.size} bytes, ${contentType})`);
   const result = metaToPutResult(meta);
-  fireCallback(c.req.header("authorization"), result);
+  fireCallback(authorization, result);
   return c.json(result, 200);
 });
 
@@ -219,9 +281,29 @@ api.post("/delete", async (c) => {
 // ---- POST /mpu?pathname= ---- multipart upload ----
 api.post("/mpu", async (c) => {
   const action = c.req.header("x-mpu-action");
+  const header = (name: string) => c.req.header(name);
+  const authorization = c.req.header("authorization");
+  // The SDK sends the pathname on every multipart request, so each one is checked against the token.
+  const requestedPathname = c.req.query("pathname");
+
+  if (requestedPathname) {
+    const tokenError = checkClientToken({
+      authorization,
+      // Multipart requests only name the blob's type in `x-content-type`; `content-type` is the body's.
+      contentType: action === "upload" ? undefined : c.req.header("x-content-type"),
+      pathname: requestedPathname,
+      size:
+        action === "upload"
+          ? getContentLength(c.req.header("content-length"))
+          : undefined,
+    });
+    if (tokenError) return rejectClientToken(c, tokenError);
+  } else if (parseClientToken(authorization)) {
+    return c.json({ error: "pathname is required" }, 400);
+  }
 
   if (action === "create") {
-    const pathname = c.req.query("pathname");
+    const pathname = requestedPathname;
     if (!pathname) return c.json({ error: "pathname is required" }, 400);
     const uploadId = randomBytes(16).toString("hex");
     await mpuCreate(uploadId);
@@ -247,16 +329,21 @@ api.post("/mpu", async (c) => {
     if (!uploadId || !key) {
       return c.json({ error: "Missing uploadId or key" }, 400);
     }
+    if (requestedPathname && key !== requestedPathname) {
+      return c.json({ error: "key does not match pathname" }, 400);
+    }
+
+    const options = getUploadOptions(authorization, header);
+    if (!options.allowOverwrite && (await blobExists(key))) {
+      return c.json({ error: "Blob already exists" }, 400);
+    }
+
     const parts = await c.req.json<{ etag: string; partNumber: number }[]>();
     const access =
       c.req.header("x-vercel-blob-access") === "private" ? "private" : "public";
-    const contentType =
-      c.req.header("x-content-type") ??
-      c.req.header("content-type") ??
-      "application/octet-stream";
-    const cacheControl = defaultCacheControl(
-      c.req.header("x-cache-control-max-age"),
-    );
+    // The complete request sends JSON, so only `x-content-type` names the blob's type.
+    const contentType = c.req.header("x-content-type") ?? "application/octet-stream";
+    const cacheControl = defaultCacheControl(options.cacheControlMaxAge);
 
     const meta = await mpuComplete(uploadId, key, parts, {
       contentType,
@@ -265,9 +352,16 @@ api.post("/mpu", async (c) => {
       pathname: key,
     });
 
+    const token = parseClientToken(authorization);
+    const sizeError = token && checkSize({ payload: token.payload, size: meta.size });
+    if (sizeError) {
+      await deleteBlob(key);
+      return rejectClientToken(c, sizeError);
+    }
+
     console.log(`blob created (mpu): ${key} (${meta.size} bytes, ${contentType})`);
     const result = metaToPutResult(meta);
-    fireCallback(c.req.header("authorization"), result);
+    fireCallback(authorization, result);
     return c.json(result, 200);
   }
 

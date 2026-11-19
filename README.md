@@ -17,6 +17,7 @@ compatible with the `@vercel/blob` SDK.
 - Blob serving with ETags, cache headers, and download mode
 - Cursor-based pagination and folded listing
 - `onUploadCompleted` callbacks signed with `x-vercel-signature`
+- Client token restrictions: `pathname`, `validUntil`, `maximumSizeInBytes`, `allowedContentTypes`, `allowOverwrite`, `addRandomSuffix` and `cacheControlMaxAge` are taken from the token, as Vercel Blob does. The token signature is checked when `BLOB_READ_WRITE_TOKEN` is set.
 
 ## Installation
 
@@ -68,4 +69,4 @@ VERCEL_BLOB_CALLBACK_URL=http://localhost:3000        # your app's base URL; omi
 | `BLOB_STORE_ID`         | `emulator`              | Store identifier (used internally).                                                                                          |
 | `DATA_DIR`              | `/data`                 | Directory where blobs and metadata are stored.                                                                               |
 | `EMULATOR_BASE_URL`     | `http://localhost:3000` | Base URL the emulator uses when constructing blob URLs. Set this if the emulator is behind a proxy or on a non-default port. |
-| `BLOB_READ_WRITE_TOKEN` | _(none)_                | Must match the token used by your app. Required for signing `onUploadCompleted` callbacks.                                   |
+| `BLOB_READ_WRITE_TOKEN` | _(none)_                | Must match the token used by your app. Required for signing `onUploadCompleted` callbacks and for verifying client tokens.   |

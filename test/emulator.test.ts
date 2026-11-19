@@ -3,10 +3,28 @@ import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BlobNotFoundError, del, head, list, put } from "@vercel/blob";
 import {
+  BlobAccessError,
+  BlobClientTokenExpiredError,
+  BlobContentTypeNotAllowedError,
+  BlobFileTooLargeError,
+  BlobNotFoundError,
+  BlobPathnameMismatchError,
+  completeMultipartUpload,
+  createMultipartUpload,
+  del,
+  head,
+  list,
+  put,
+  uploadPart,
+} from "@vercel/blob";
+import {
+  createMultipartUpload as createClientMultipartUpload,
+  generateClientTokenFromReadWriteToken,
   handleUpload,
+  put as clientPut,
   upload,
+  type GenerateClientTokenOptions,
   type HandleUploadBody,
 } from "@vercel/blob/client";
 
@@ -554,5 +572,198 @@ describe("client upload (upload())", () => {
     } finally {
       callbackServer.stop(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// client token restrictions
+// ---------------------------------------------------------------------------
+//
+// Vercel Blob enforces the options signed into a client token, whatever the request headers say.
+
+describe("client token restrictions", () => {
+  const clientToken = (options: Omit<GenerateClientTokenOptions, "token">) =>
+    generateClientTokenFromReadWriteToken({
+      ...options,
+      token: process.env.BLOB_READ_WRITE_TOKEN!,
+    });
+
+  const expectMissing = async (pathname: string) => {
+    await expect(head(pathname)).rejects.toBeInstanceOf(BlobNotFoundError);
+  };
+
+  test("rejects an upload to a pathname other than the token's", async () => {
+    const token = await clientToken({ pathname: "scope/allowed.txt" });
+
+    await expect(
+      clientPut("scope/other.txt", "x", { access: "public", token }),
+    ).rejects.toBeInstanceOf(BlobPathnameMismatchError);
+    await expectMissing("scope/other.txt");
+  });
+
+  test("accepts an upload to the token's pathname", async () => {
+    const token = await clientToken({ pathname: "scope/exact.txt" });
+    const result = await clientPut("scope/exact.txt", "x", { access: "public", token });
+
+    expect(result.pathname).toBe("scope/exact.txt");
+  });
+
+  test("rejects an expired token", async () => {
+    const token = await clientToken({
+      pathname: "scope/expired.txt",
+      validUntil: Date.now() - 1000,
+    });
+
+    await expect(
+      clientPut("scope/expired.txt", "x", { access: "public", token }),
+    ).rejects.toBeInstanceOf(BlobClientTokenExpiredError);
+    await expectMissing("scope/expired.txt");
+  });
+
+  test("rejects a body larger than maximumSizeInBytes", async () => {
+    const token = await clientToken({
+      maximumSizeInBytes: 4,
+      pathname: "scope/large.txt",
+    });
+
+    await expect(
+      clientPut("scope/large.txt", "12345", { access: "public", token }),
+    ).rejects.toBeInstanceOf(BlobFileTooLargeError);
+    await expectMissing("scope/large.txt");
+  });
+
+  test("rejects a streamed body larger than maximumSizeInBytes", async () => {
+    const token = await clientToken({
+      maximumSizeInBytes: 4,
+      pathname: "scope/streamed.txt",
+    });
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("12345"));
+        controller.close();
+      },
+    });
+
+    await expect(
+      clientPut("scope/streamed.txt", body, { access: "public", token }),
+    ).rejects.toBeInstanceOf(BlobFileTooLargeError);
+    await expectMissing("scope/streamed.txt");
+  });
+
+  test("rejects a content type the token does not allow", async () => {
+    const token = await clientToken({
+      allowedContentTypes: ["image/*"],
+      pathname: "scope/type.txt",
+    });
+
+    await expect(
+      clientPut("scope/type.txt", "x", {
+        access: "public",
+        contentType: "text/plain",
+        token,
+      }),
+    ).rejects.toBeInstanceOf(BlobContentTypeNotAllowedError);
+
+    const imageToken = await clientToken({
+      allowedContentTypes: ["image/*"],
+      pathname: "scope/type.png",
+    });
+    const result = await clientPut("scope/type.png", "x", {
+      access: "public",
+      contentType: "image/png",
+      token: imageToken,
+    });
+
+    expect(result.pathname).toBe("scope/type.png");
+  });
+
+  test("rejects a token whose payload was changed after signing", async () => {
+    const token = await clientToken({ pathname: "scope/signed.txt" });
+    const [prefix, encoded] = [
+      token.slice(0, token.lastIndexOf("_") + 1),
+      token.slice(token.lastIndexOf("_") + 1),
+    ];
+    const [signature] = Buffer.from(encoded, "base64").toString().split(".");
+    const forgedPayload = Buffer.from(
+      JSON.stringify({ pathname: "scope/forged.txt", validUntil: Date.now() + 60_000 }),
+    ).toString("base64");
+    const forged = `${prefix}${Buffer.from(`${signature}.${forgedPayload}`).toString("base64")}`;
+
+    await expect(
+      clientPut("scope/forged.txt", "x", { access: "public", token: forged }),
+    ).rejects.toBeInstanceOf(BlobAccessError);
+    await expectMissing("scope/forged.txt");
+  });
+
+  test("takes allowOverwrite from the token, not the request headers", async () => {
+    const pathname = "scope/overwrite.txt";
+    await put(pathname, "v1", { access: "public" });
+
+    const denied = await clientToken({ pathname });
+    const response = await fetch(
+      `${process.env.VERCEL_BLOB_API_URL}/?pathname=${encodeURIComponent(pathname)}`,
+      {
+        body: "v2",
+        headers: {
+          authorization: `Bearer ${denied}`,
+          "x-allow-overwrite": "1",
+          "x-api-version": "12",
+        },
+        method: "PUT",
+      },
+    );
+    expect(response.status).toBe(400);
+
+    const allowed = await clientToken({ allowOverwrite: true, pathname });
+    await clientPut(pathname, "v3", { access: "public", token: allowed });
+
+    expect(await (await fetch(`${BASE_URL}/${pathname}`)).text()).toBe("v3");
+  });
+
+  test("rejects a multipart upload to a pathname other than the token's", async () => {
+    const token = await clientToken({ pathname: "scope/mpu-allowed.bin" });
+
+    await expect(
+      createClientMultipartUpload("scope/mpu-other.bin", { access: "public", token }),
+    ).rejects.toBeInstanceOf(BlobPathnameMismatchError);
+  });
+});
+
+describe("multipart upload overwrite", () => {
+  test("rejects completing over an existing blob without allowOverwrite", async () => {
+    const pathname = "mpu/existing.bin";
+    await put(pathname, "original", { access: "public" });
+
+    const { key, uploadId } = await createMultipartUpload(pathname, {
+      access: "public",
+    });
+    const part = await uploadPart(pathname, "replacement", {
+      access: "public",
+      key,
+      partNumber: 1,
+      uploadId,
+    });
+
+    await expect(
+      completeMultipartUpload(pathname, [part], { access: "public", key, uploadId }),
+    ).rejects.toThrow();
+    expect(await (await fetch(`${BASE_URL}/${pathname}`)).text()).toBe("original");
+  });
+
+  test("keeps the blob content type rather than the JSON request body type", async () => {
+    const pathname = "mpu/typed.bin";
+    const { key, uploadId } = await createMultipartUpload(pathname, {
+      access: "public",
+    });
+    const part = await uploadPart(pathname, "bytes", {
+      access: "public",
+      key,
+      partNumber: 1,
+      uploadId,
+    });
+
+    await completeMultipartUpload(pathname, [part], { access: "public", key, uploadId });
+
+    expect((await head(pathname)).contentType).toBe("application/octet-stream");
   });
 });
