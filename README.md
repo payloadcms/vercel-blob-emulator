@@ -17,6 +17,7 @@ compatible with the `@vercel/blob` SDK.
 - Blob serving with ETags, cache headers, and download mode
 - Cursor-based pagination and folded listing
 - `onUploadCompleted` callbacks signed with `x-vercel-signature`
+- Client token restrictions: `pathname`, `validUntil`, `maximumSizeInBytes`, `allowedContentTypes`, `allowOverwrite`, `addRandomSuffix` and `cacheControlMaxAge` are taken from the token, as Vercel Blob does.
 
 ## Installation
 
